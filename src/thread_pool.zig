@@ -115,6 +115,8 @@ pub const ThreadPool = struct {
             .body = task.endpoint.body,
         };
 
+        std.debug.print("Connections pool: {d}\n", .{task.connection_pool.available.items.len});
+        std.debug.print("Client: {any}\n", .{client});
         var res = client.send(req) catch |err| {
             try task.store.add(.{
                 .url = task.endpoint.full_path,

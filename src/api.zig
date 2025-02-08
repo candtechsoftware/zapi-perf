@@ -71,10 +71,12 @@ pub const Client = struct {
     stream: union(enum) {
         plain: std.net.Stream,
     } = .{ .plain = undefined },
+    index: usize,
 
-    pub fn init(allocator: std.mem.Allocator) Client {
+    pub fn init(allocator: std.mem.Allocator, index: usize) Client {
         return .{
             .allocator = allocator,
+            .index = index,
         };
     }
 
@@ -101,7 +103,7 @@ pub const Client = struct {
             self.stream = .{ .plain = socket };
         }
 
-        var conn = self.connection.?;
+        var conn = self.stream.plain;
         var request_builder = std.ArrayList(u8).init(self.allocator);
         defer request_builder.deinit();
 
@@ -211,6 +213,7 @@ pub const Client = struct {
 pub const ConnectionPool = struct {
     clients: []Client,
     mutex: Thread.Mutex = .{},
+    cond: Thread.Condition = .{},
     available: std.ArrayList(usize),
     allocator: std.mem.Allocator,
 
@@ -219,7 +222,7 @@ pub const ConnectionPool = struct {
         var available = std.ArrayList(usize).init(allocator);
 
         for (0..size) |i| {
-            clients[i] = Client.init(allocator);
+            clients[i] = Client.init(allocator, i);
             try available.append(i);
         }
 
@@ -235,10 +238,12 @@ pub const ConnectionPool = struct {
         defer self.mutex.unlock();
 
         if (self.available.items.len == 0) {
-            return null;
+            self.cond.wait(&self.mutex);
         }
 
         const index = self.available.orderedRemove(0);
+        std.debug.print("Acquired connection at index: {d}\n", .{index});
+        std.debug.print("Clients:::{any}\n", .{self.clients});
         return &self.clients[index];
     }
 
@@ -246,8 +251,9 @@ pub const ConnectionPool = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const index = @intFromPtr(client) - @intFromPtr(&self.clients[0]);
-        try self.available.append(@intCast(index));
+        try self.available.append(@intCast(client.index));
+
+        self.cond.signal();
     }
 
     pub fn deinit(self: *ConnectionPool) void {

@@ -11,9 +11,9 @@ pub fn main() !void {
     const endpoints = [_]perf.api.Endpoint{
         perf.api.Endpoint{
             .body = "",
-            .path = "https://google.com",
+            .path = "http://google.com",
             .method = .GET,
-            .full_path = "https://google.com",
+            .full_path = "http://google.com",
         },
     };
     var runner = try perf.BenchmarkRunner.init(allocator, 2, 2);
