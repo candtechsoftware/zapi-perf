@@ -3,6 +3,7 @@ const Cli = @import("cli.zig").Cli;
 const Env = @import("root.zig").Env;
 const Runner = @import("root.zig").BenchmarkRunner;
 const Endpoint = @import("api.zig").Endpoint;
+const json = @import("json.zig");
 
 pub const App = struct {
     runner: *Runner,
@@ -20,7 +21,9 @@ pub const App = struct {
         try env.load();
         defer env.deinit();
 
-        var cli = Cli.init(allocator);
+        const parser = json.Parser.init(allocator, env);
+
+        var cli = Cli.init(allocator, parser);
 
         const parsed_args = try cli.parseArgs();
         const config = parsed_args.config;

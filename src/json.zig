@@ -1,12 +1,16 @@
 const std = @import("std");
 const api = @import("api.zig");
+const Env = @import("env.zig").Env;
+const Endpoint = @import("api.zig").Endpoint;
 
 pub const Parser = struct {
     allocator: std.mem.Allocator,
+    env: Env,
 
-    pub fn init(allocator: std.mem.Allocator) Parser {
+    pub fn init(allocator: std.mem.Allocator, env: Env) Parser {
         return .{
             .allocator = allocator,
+            .env = env,
         };
     }
 
@@ -33,7 +37,16 @@ pub const Parser = struct {
             const endpoint_json = try std.json.stringifyAlloc(self.allocator, item, .{});
             defer self.allocator.free(endpoint_json);
 
-            const endpoint = try api.Endpoint.jsonParse(self.allocator, endpoint_json, .{});
+            var endpoint = try api.Endpoint.jsonParse(self.allocator, endpoint_json, .{});
+            if (endpoint.headers.authorization) |auth| {
+                if (Endpoint.extractEnvVar(auth)) |var_name| {
+                    const new_auth = try self.env.get(var_name);
+                    const token = try self.allocator.dupe(u8, new_auth);
+                    const parts = [_][]const u8{ "Bearer", token };
+                    endpoint.headers.authorization = try std.mem.join(self.allocator, " ", &parts);
+                }
+            }
+
             try endpoints.append(endpoint);
         }
 

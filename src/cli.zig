@@ -2,13 +2,16 @@ const std = @import("std");
 const Parser = @import("json.zig").Parser;
 const Endpoint = @import("api.zig").Endpoint;
 const Config = @import("app.zig").App.Config;
+const Env = @import("env.zig").Env;
 
 pub const Cli = struct {
     allocator: std.mem.Allocator,
+    parser: Parser,
 
-    pub fn init(allocator: std.mem.Allocator) Cli {
+    pub fn init(allocator: std.mem.Allocator, parser: Parser) Cli {
         return .{
             .allocator = allocator,
+            .parser = parser,
         };
     }
 
@@ -41,8 +44,7 @@ pub const Cli = struct {
                 var parts = std.mem.splitAny(u8, arg, "=");
                 _ = parts.first(); // Skipping the flag name
                 const file_path = parts.next() orelse return error.InvalidArgument;
-                var parser = Parser.init(self.allocator);
-                const endpoints = try parser.parse(file_path);
+                const endpoints = try self.parser.parse(file_path);
                 ret.endpoints = endpoints;
             } else if (std.mem.startsWith(u8, arg, "--thread-count=")) {
                 var parts = std.mem.splitAny(u8, arg, "=");

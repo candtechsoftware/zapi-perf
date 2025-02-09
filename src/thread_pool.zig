@@ -103,7 +103,6 @@ pub const ThreadPool = struct {
         }
     }
 
-    // Task job to be ran in the thread.
     fn processTask(task: *Task) !void {
         const start_time = std.time.milliTimestamp();
         const client = task.connection_pool.acquire() orelse return error.NoAvailableConnection;

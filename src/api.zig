@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = std.http;
 const Thread = std.Thread;
+const env = @import("env.zig");
 
 pub const Endpoint = struct {
     method: http.Method,
@@ -8,52 +9,63 @@ pub const Endpoint = struct {
     body: []const u8 = "",
     headers: Request.Headers = .{},
 
+    // TODO(Alex): I don't like this api for this
+    // for now it works but need to refactor this to automatically do this for every header
+    pub fn extractEnvVar(text: []const u8) ?[]const u8 {
+        if (std.mem.indexOf(u8, text, "<")) |start| {
+            if (std.mem.indexOf(u8, text[start..], ">")) |end| {
+                return text[start + 1 .. start + end];
+            }
+        }
+        return null;
+    }
+
     pub fn jsonParse(allocator: std.mem.Allocator, source: []const u8, options: std.json.ParseOptions) !Endpoint {
-        var endpoint = try std.json.parseFromSlice(
-            struct {
-                method: []const u8,
-                url: []const u8,
-                body: ?[]const u8 = null,
-                headers: ?std.json.Value = null,
-            },
-            allocator,
-            source,
-            options,
-        );
-        defer endpoint.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, options);
+        defer parsed.deinit();
+
+        const value = parsed.value;
+        if (value != .object) return error.InvalidJson;
+
+        const method = value.object.get("method") orelse return error.MissingMethod;
+        const url = value.object.get("url") orelse return error.MissingUrl;
+        if (method != .string or url != .string) return error.InvalidFormat;
 
         var headers = Request.Headers.init(allocator);
-        if (endpoint.value.headers) |h| {
+        if (value.object.get("headers")) |h| {
             if (h == .object) {
                 var it = h.object.iterator();
                 while (it.next()) |header| {
-                    const key = header.key_ptr.*;
-                    const value = header.value_ptr.*;
-                    if (value != .string) continue;
+                    if (header.value_ptr.* != .string) continue;
+                    const header_value = header.value_ptr.string;
 
-                    if (std.ascii.eqlIgnoreCase(key, "authorization")) {
-                        headers.authorization = try allocator.dupe(u8, value.string);
-                    } else if (std.ascii.eqlIgnoreCase(key, "content-type")) {
-                        headers.content_type = try allocator.dupe(u8, value.string);
-                    } else if (std.ascii.eqlIgnoreCase(key, "accept")) {
-                        headers.accept = try allocator.dupe(u8, value.string);
+                    if (std.ascii.eqlIgnoreCase(header.key_ptr.*, "authorization")) {
+                        headers.authorization = try allocator.dupe(u8, header_value);
+                    } else if (std.ascii.eqlIgnoreCase(header.key_ptr.*, "content-type")) {
+                        headers.content_type = try allocator.dupe(u8, header_value);
+                    } else if (std.ascii.eqlIgnoreCase(header.key_ptr.*, "accept")) {
+                        headers.accept = try allocator.dupe(u8, header_value);
                     } else {
                         try headers.custom.put(
-                            try allocator.dupe(u8, key),
-                            try allocator.dupe(u8, value.string),
+                            try allocator.dupe(u8, header.key_ptr.*),
+                            try allocator.dupe(u8, header_value),
                         );
                     }
                 }
             }
         }
 
+        const body_str = if (value.object.get("body")) |b| blk: {
+            var body_string = std.ArrayList(u8).init(allocator);
+            errdefer body_string.deinit();
+            try std.json.stringify(b, .{}, body_string.writer());
+            break :blk try body_string.toOwnedSlice();
+        } else "";
+
         return .{
-            .method = try Request.methodFromStr(endpoint.value.method),
-            .url = try allocator.dupe(u8, endpoint.value.url),
-            .body = if (endpoint.value.body) |b|
-                try allocator.dupe(u8, b)
-            else
-                "",
+            .method = try Request.methodFromStr(method.string),
+            .url = try allocator.dupe(u8, url.string),
+            .body = body_str,
             .headers = headers,
         };
     }
@@ -63,7 +75,6 @@ pub const Endpoint = struct {
         try writer.print("  Method: {s}\n", .{Request.methodToString(self.method)});
         try writer.print("  URL: {s}\n", .{self.url});
 
-        // Print headers
         try writer.print("  Headers:\n", .{});
         if (self.headers.authorization) |auth| {
             try writer.print("    Authorization: {s}\n", .{auth});
@@ -75,13 +86,11 @@ pub const Endpoint = struct {
             try writer.print("    Accept: {s}\n", .{accept});
         }
 
-        // Print custom headers
         var it = self.headers.custom.iterator();
         while (it.next()) |header| {
             try writer.print("    {s}: {s}\n", .{ header.key_ptr.*, header.value_ptr.* });
         }
 
-        // Print body if not empty
         if (self.body.len > 0) {
             try writer.print("  Body: {s}\n", .{self.body});
         }
@@ -128,7 +137,7 @@ pub const Request = struct {
     pub fn methodFromStr(method: []const u8) !http.Method {
         // TODO(Alex): support more methods
         if (std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "get")) return http.Method.GET;
-        if (std.mem.eql(u8, method, "POST") or std.mem.eql(u8, method, "post")) return http.Method.GET;
+        if (std.mem.eql(u8, method, "POST") or std.mem.eql(u8, method, "post")) return http.Method.POST;
         return error.InvalidMethod;
     }
 
@@ -216,12 +225,25 @@ pub const Client = struct {
         var request_builder = std.ArrayList(u8).init(self.allocator);
         defer request_builder.deinit();
 
+        // Build path with query parameters
+        const full_path = if (uri.query) |q| blk: {
+            var path_with_query = std.ArrayList(u8).init(self.allocator);
+            try path_with_query.writer().print("{s}?{s}", .{ path, q.percent_encoded });
+            break :blk try path_with_query.toOwnedSlice();
+        } else path;
+        defer if (uri.query != null) self.allocator.free(full_path);
+
+        const method_str = Request.methodToString(req.method);
         try request_builder.writer().print("{s} {s} HTTP/1.1\r\n", .{
-            Request.methodToString(req.method),
-            path,
+            method_str,
+            full_path,
         });
+
         try request_builder.writer().print("Host: {s}\r\n", .{host});
         if (req.headers.authorization) |auth| {
+            if (std.mem.containsAtLeast(u8, auth, 1, "<")) {
+                @panic("Basic auth not supported yet");
+            }
             try request_builder.writer().print("Authorization: {s}\r\n", .{auth});
         }
         if (req.headers.content_type) |ct| {
@@ -233,7 +255,7 @@ pub const Client = struct {
 
         var header_it = req.headers.custom.iterator();
         while (header_it.next()) |h| {
-            try request_builder.writer().print("{s}: {s}\r\n", .{
+            try request_builder.writer().print("{s}: {s}\r\r", .{
                 h.key_ptr.*,
                 h.value_ptr.*,
             });
@@ -252,7 +274,7 @@ pub const Client = struct {
     pub fn send(self: *Client, req: Request) !Response {
         const uri = try std.Uri.parse(req.url);
         const host = try std.Uri.Component.toRawMaybeAlloc(uri.host.?, self.allocator);
-        const is_https = std.mem.eql(u8, "", "https");
+        const is_https = std.mem.startsWith(u8, req.url, "https");
         const port: u16 = uri.port orelse if (is_https) 443 else 80;
 
         var socket = try std.net.tcpConnectToHost(self.allocator, host, port);
@@ -276,23 +298,32 @@ pub const Client = struct {
         var res_headers = std.StringHashMap([]const u8).init(self.allocator);
 
         // Reading the status of the request
-        {
-            const line = try conn.reader().readUntilDelimiter(&buffer, '\n');
-            total_received += line.len;
-            var parts = std.mem.splitAny(u8, line, " ");
-            _ = parts.next(); // HTTP version
-            if (parts.next()) |status_str| {
-                status = try std.fmt.parseInt(u32, status_str, 10);
-            }
+        var status_buffer: [128]u8 = undefined;
+        const status_line = try conn.reader().readUntilDelimiter(&status_buffer, '\n');
+        total_received += status_line.len;
+        var parts = std.mem.splitAny(u8, status_line, " ");
+        _ = parts.next(); // HTTP version
+        if (parts.next()) |status_str| {
+            status = try std.fmt.parseInt(u32, status_str, 10);
         }
 
-        // Reading the headers
-        while (try conn.reader().readUntilDelimiterOrEof(&buffer, '\n')) |line| {
+        // Reading the headers with larger buffer
+        var header_buffer: [8192]u8 = undefined;
+
+        while (true) {
+            const line = conn.reader().readUntilDelimiter(&header_buffer, '\n') catch |err| {
+                if (err == error.StreamTooLong) {
+                    std.log.warn("Header too long, truncating", .{});
+                    continue;
+                }
+                return err;
+            };
             total_received += line.len;
             if (line.len <= 2) break; // empty line
-            var parts = std.mem.splitAny(u8, line, ":");
-            if (parts.next()) |name| {
-                if (parts.next()) |value| {
+
+            var header_parts = std.mem.splitAny(u8, line, ":");
+            if (header_parts.next()) |name| {
+                if (header_parts.next()) |value| {
                     const trimmed_value = std.mem.trim(u8, value, " \r");
                     const header_value = try self.allocator.dupe(u8, trimmed_value);
                     try res_headers.put(
@@ -310,7 +341,7 @@ pub const Client = struct {
             }
         }
 
-        // Reading the body of the request.
+        // Reading the body with chunked handling
         var body = std.ArrayList(u8).init(self.allocator);
         defer body.deinit();
 
@@ -318,7 +349,8 @@ pub const Client = struct {
             try body.ensureTotalCapacity(len);
             var remain = len;
             while (remain > 0) {
-                const read = try conn.read(buffer[0..@min(remain, buffer.len)]);
+                const to_read = @min(remain, buffer.len);
+                const read = try conn.read(buffer[0..to_read]);
                 if (read == 0) break;
                 try body.appendSlice(buffer[0..read]);
                 remain -= read;
@@ -326,12 +358,16 @@ pub const Client = struct {
             }
         } else {
             while (true) {
-                const read = try conn.read(&buffer);
+                const read = conn.read(&buffer) catch |err| {
+                    if (err == error.ConnectionResetByPeer) break;
+                    return err;
+                };
                 if (read == 0) break;
                 try body.appendSlice(buffer[0..read]);
                 total_received += read;
             }
         }
+
         return .{
             .status = status,
             .body = try body.toOwnedSlice(),
