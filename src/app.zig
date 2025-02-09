@@ -2,27 +2,43 @@ const std = @import("std");
 const Cli = @import("cli.zig").Cli;
 const Env = @import("root.zig").Env;
 const Runner = @import("root.zig").BenchmarkRunner;
+const Endpoint = @import("api.zig").Endpoint;
 
 pub const App = struct {
-    cli: Cli,
     runner: *Runner,
+    endpoints: []Endpoint,
+    config: Config = .{},
+
+    pub const Config = struct {
+        num_threads: usize = 1,
+        connection_count: usize = 1,
+        num_requests_per_endpoint: usize = 10,
+    };
 
     pub fn init(allocator: std.mem.Allocator) !App {
         var env = Env.init(allocator);
         try env.load();
         defer env.deinit();
 
-        const runner = try Runner.init(allocator, 2, 2);
-        const cli = Cli.init(allocator);
+        var cli = Cli.init(allocator);
+
+        const parsed_args = try cli.parseArgs();
+        const config = parsed_args.config;
+
+        const runner = try Runner.init(allocator, config.num_threads, config.connection_count);
         return .{
-            .cli = cli,
             .runner = runner,
+            .endpoints = parsed_args.endpoints,
+            .config = config,
         };
     }
 
     pub fn run(self: *App) !void {
-        const endpoints = try self.cli.parseArgs();
-        try self.runner.run(endpoints, 10);
+        try self.runner.run(
+            self.endpoints,
+            self.config.num_requests_per_endpoint,
+        );
+
         try self.runner.store.printDetailedStats();
     }
 };
