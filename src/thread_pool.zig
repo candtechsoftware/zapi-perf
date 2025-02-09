@@ -115,8 +115,6 @@ pub const ThreadPool = struct {
             .body = task.endpoint.body,
         };
 
-        std.debug.print("Connections pool: {d}\n", .{task.connection_pool.available.items.len});
-        std.debug.print("Client: {any}\n", .{client});
         var res = client.send(req) catch |err| {
             try task.store.add(.{
                 .url = task.endpoint.full_path,
@@ -125,6 +123,8 @@ pub const ThreadPool = struct {
                 .timestamp = std.time.milliTimestamp(),
                 .method = task.endpoint.method,
                 .err = err,
+                .bytes_sent = 0,
+                .bytes_received = 0,
             });
             return;
         };
@@ -139,6 +139,8 @@ pub const ThreadPool = struct {
                 .timestamp = end_time,
                 .method = task.endpoint.method,
                 .err = null,
+                .bytes_sent = res.sent_bytes,
+                .bytes_received = res.received_bytes,
             },
         );
     }

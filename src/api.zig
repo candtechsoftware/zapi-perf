@@ -53,6 +53,8 @@ pub const Response = struct {
     body: []const u8,
     headers: std.StringHashMap([]const u8),
     allocator: std.mem.Allocator,
+    sent_bytes: usize,
+    received_bytes: usize,
 
     pub fn deinit(self: *Response) void {
         self.allocator.free(self.body);
@@ -86,34 +88,18 @@ pub const Client = struct {
         }
     }
 
-    pub fn send(self: *Client, req: Request) !Response {
+    fn buildHttpRequest(self: *Client, req: Request) ![]const u8 {
         const uri = try std.Uri.parse(req.url);
         const host = try std.Uri.Component.toRawMaybeAlloc(uri.host.?, self.allocator);
-        const is_https = std.mem.eql(u8, "", "https");
-        const port: u16 = uri.port orelse if (is_https) 443 else 80;
-
-        // Create socket connection
-        var socket = try std.net.tcpConnectToHost(self.allocator, host, port);
-        errdefer socket.close();
-
-        // Setup TLS if needed
-        if (is_https) {
-            @panic("TLS not supported yet");
-        } else {
-            self.stream = .{ .plain = socket };
-        }
-
-        var conn = self.stream.plain;
+        const path = if (uri.path.percent_encoded.len == 0) "/" else uri.path.percent_encoded;
         var request_builder = std.ArrayList(u8).init(self.allocator);
         defer request_builder.deinit();
 
         try request_builder.writer().print("{s} {s} HTTP/1.1\r\n", .{
             Request.methodToString(req.method),
-            host,
+            path,
         });
-
         try request_builder.writer().print("Host: {s}\r\n", .{host});
-
         if (req.headers.authorization) |auth| {
             try request_builder.writer().print("Authorization: {s}\r\n", .{auth});
         }
@@ -139,18 +125,39 @@ pub const Client = struct {
         } else {
             try request_builder.writer().writeAll("\r\n");
         }
+        return try request_builder.toOwnedSlice();
+    }
 
-        // Sending the request
-        try conn.writer().writeAll(request_builder.items);
+    pub fn send(self: *Client, req: Request) !Response {
+        const uri = try std.Uri.parse(req.url);
+        const host = try std.Uri.Component.toRawMaybeAlloc(uri.host.?, self.allocator);
+        const is_https = std.mem.eql(u8, "", "https");
+        const port: u16 = uri.port orelse if (is_https) 443 else 80;
 
-        var res_headers = std.StringHashMap([]const u8).init(self.allocator);
+        var socket = try std.net.tcpConnectToHost(self.allocator, host, port);
+        errdefer socket.close();
+
+        if (is_https) {
+            @panic("TLS not supported yet");
+        } else {
+            self.stream = .{ .plain = socket };
+        }
+
+        var conn = self.stream.plain;
+        const http_request = try self.buildHttpRequest(req);
+        const sent_len = http_request.len;
+        try conn.writer().writeAll(http_request);
+
+        var total_received: usize = 0;
         var buffer: [4096]u8 = undefined;
         var status: u32 = 0;
         var content_len: ?usize = null;
+        var res_headers = std.StringHashMap([]const u8).init(self.allocator);
 
         // Reading the status of the request
         {
             const line = try conn.reader().readUntilDelimiter(&buffer, '\n');
+            total_received += line.len;
             var parts = std.mem.splitAny(u8, line, " ");
             _ = parts.next(); // HTTP version
             if (parts.next()) |status_str| {
@@ -160,6 +167,7 @@ pub const Client = struct {
 
         // Reading the headers
         while (try conn.reader().readUntilDelimiterOrEof(&buffer, '\n')) |line| {
+            total_received += line.len;
             if (line.len <= 2) break; // empty line
             var parts = std.mem.splitAny(u8, line, ":");
             if (parts.next()) |name| {
@@ -193,12 +201,14 @@ pub const Client = struct {
                 if (read == 0) break;
                 try body.appendSlice(buffer[0..read]);
                 remain -= read;
+                total_received += read;
             }
         } else {
             while (true) {
                 const read = try conn.read(&buffer);
                 if (read == 0) break;
                 try body.appendSlice(buffer[0..read]);
+                total_received += read;
             }
         }
         return .{
@@ -206,6 +216,8 @@ pub const Client = struct {
             .body = try body.toOwnedSlice(),
             .headers = res_headers,
             .allocator = self.allocator,
+            .sent_bytes = sent_len,
+            .received_bytes = total_received,
         };
     }
 };
@@ -242,8 +254,6 @@ pub const ConnectionPool = struct {
         }
 
         const index = self.available.orderedRemove(0);
-        std.debug.print("Acquired connection at index: {d}\n", .{index});
-        std.debug.print("Clients:::{any}\n", .{self.clients});
         return &self.clients[index];
     }
 

@@ -15,10 +15,16 @@ pub fn main() !void {
             .method = .GET,
             .full_path = "http://google.com",
         },
+        perf.api.Endpoint{
+            .body = "",
+            .path = "http://google.com",
+            .method = .POST,
+            .full_path = "https://httpbin.org/post",
+        },
     };
     var runner = try perf.BenchmarkRunner.init(allocator, 2, 2);
     defer runner.deinit();
 
     try runner.run(&endpoints, 10);
-    runner.store.print();
+    try runner.store.printDetailedStats();
 }
