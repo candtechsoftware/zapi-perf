@@ -8,6 +8,11 @@ pub const Cli = struct {
     allocator: std.mem.Allocator,
     parser: Parser,
 
+    const Result = struct {
+        endpoints: []Endpoint,
+        config: Config,
+    };
+
     pub fn init(allocator: std.mem.Allocator, parser: Parser) Cli {
         return .{
             .allocator = allocator,
@@ -29,7 +34,7 @@ pub const Cli = struct {
         return std.fmt.parseInt(usize, value, 10);
     }
 
-    pub fn parseArgs(self: *Cli) !struct { endpoints: []Endpoint, config: Config } {
+    pub fn parseArgs(self: *Cli) !Result {
         var args = try std.process.argsWithAllocator(self.allocator);
         defer args.deinit();
         _ = args.skip(); // Skipping the name of the program

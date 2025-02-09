@@ -8,7 +8,7 @@ const json = @import("json.zig");
 pub const App = struct {
     runner: *Runner,
     endpoints: []Endpoint,
-    config: Config = .{},
+    config: Config,
 
     pub const Config = struct {
         num_threads: usize = 1,
@@ -27,11 +27,12 @@ pub const App = struct {
 
         const parsed_args = try cli.parseArgs();
         const config = parsed_args.config;
+        const endpoints = parsed_args.endpoints;
 
         const runner = try Runner.init(allocator, config.num_threads, config.connection_count);
         return .{
             .runner = runner,
-            .endpoints = parsed_args.endpoints,
+            .endpoints = endpoints,
             .config = config,
         };
     }

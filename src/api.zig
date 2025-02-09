@@ -158,13 +158,11 @@ pub const Request = struct {
             try writer.print("    Accept: {s}\n", .{accept});
         }
 
-        // Print custom headers
         var it = self.headers.custom.iterator();
         while (it.next()) |header| {
             try writer.print("    {s}: {s}\n", .{ header.key_ptr.*, header.value_ptr.* });
         }
 
-        // Print body if exists
         if (self.body) |body| {
             try writer.print("  Body: {s}\n", .{body});
         }
