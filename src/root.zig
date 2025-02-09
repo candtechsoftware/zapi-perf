@@ -2,6 +2,9 @@ const std = @import("std");
 const http = std.http;
 
 pub usingnamespace @import("env.zig");
+pub usingnamespace @import("cli.zig");
+pub usingnamespace @import("json.zig");
+pub usingnamespace @import("app.zig");
 
 pub const api = @import("api.zig");
 pub const threads = @import("thread_pool.zig");
@@ -39,6 +42,14 @@ pub const BenchmarkRunner = struct {
 
     pub fn run(self: *BenchmarkRunner, endpoints: []const api.Endpoint, req_per_endpoint: usize) !void {
         const total_tasks = endpoints.len * req_per_endpoint;
+        const bar_width = 50;
+        const stdout_file = std.io.getStdOut();
+        var buffered_writer = std.io.bufferedWriter(stdout_file.writer());
+        const stdout = buffered_writer.writer();
+
+        // Print initial progress
+        try stdout.print("\rProgress: 0.00%", .{});
+        try buffered_writer.flush();
 
         for (endpoints) |endpoint| {
             for (0..req_per_endpoint) |_| {
@@ -52,10 +63,21 @@ pub const BenchmarkRunner = struct {
 
         while (true) {
             const completed = self.thread_pool.getCompletedTask();
-            const progress = @as(f64, @floatFromInt(completed)) / @as(f64, @floatFromInt(total_tasks)) * 100.0;
-            std.log.info("\r Progress {d:1}%", .{progress});
+            const progress = @as(f64, @floatFromInt(completed)) / @as(f64, @floatFromInt(total_tasks));
+            const filled = @as(usize, @intFromFloat(progress * @as(f64, bar_width)));
 
-            if (completed == total_tasks) break;
+            // Update progress bar
+            try stdout.print("\r[", .{});
+            try stdout.writeByteNTimes('=', filled);
+            try stdout.writeByteNTimes(' ', bar_width - filled);
+            try stdout.print("] {d:3.2}%", .{progress * 100.0});
+            try buffered_writer.flush();
+
+            if (completed == total_tasks) {
+                try stdout.print("\n", .{});
+                try buffered_writer.flush();
+                break;
+            }
             std.time.sleep(100 * std.time.ns_per_ms);
         }
     }

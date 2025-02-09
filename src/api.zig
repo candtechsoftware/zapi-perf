@@ -4,10 +4,95 @@ const Thread = std.Thread;
 
 pub const Endpoint = struct {
     method: http.Method,
-    path: []const u8,
-    full_path: []const u8,
-    body: []const u8,
+    url: []const u8,
+    body: []const u8 = "",
     headers: Request.Headers = .{},
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: []const u8, options: std.json.ParseOptions) !Endpoint {
+        var endpoint = try std.json.parseFromSlice(
+            struct {
+                method: []const u8,
+                url: []const u8,
+                body: ?[]const u8 = null,
+                headers: ?std.json.Value = null,
+            },
+            allocator,
+            source,
+            options,
+        );
+        defer endpoint.deinit();
+
+        var headers = Request.Headers.init(allocator);
+        if (endpoint.value.headers) |h| {
+            if (h == .object) {
+                var it = h.object.iterator();
+                while (it.next()) |header| {
+                    const key = header.key_ptr.*;
+                    const value = header.value_ptr.*;
+                    if (value != .string) continue;
+
+                    if (std.ascii.eqlIgnoreCase(key, "authorization")) {
+                        headers.authorization = try allocator.dupe(u8, value.string);
+                    } else if (std.ascii.eqlIgnoreCase(key, "content-type")) {
+                        headers.content_type = try allocator.dupe(u8, value.string);
+                    } else if (std.ascii.eqlIgnoreCase(key, "accept")) {
+                        headers.accept = try allocator.dupe(u8, value.string);
+                    } else {
+                        try headers.custom.put(
+                            try allocator.dupe(u8, key),
+                            try allocator.dupe(u8, value.string),
+                        );
+                    }
+                }
+            }
+        }
+
+        return .{
+            .method = try Request.methodFromStr(endpoint.value.method),
+            .url = try allocator.dupe(u8, endpoint.value.url),
+            .body = if (endpoint.value.body) |b|
+                try allocator.dupe(u8, b)
+            else
+                "",
+            .headers = headers,
+        };
+    }
+
+    pub fn print(self: Endpoint, writer: anytype) !void {
+        try writer.print("Endpoint:\n", .{});
+        try writer.print("  Method: {s}\n", .{Request.methodToString(self.method)});
+        try writer.print("  URL: {s}\n", .{self.url});
+
+        // Print headers
+        try writer.print("  Headers:\n", .{});
+        if (self.headers.authorization) |auth| {
+            try writer.print("    Authorization: {s}\n", .{auth});
+        }
+        if (self.headers.content_type) |ct| {
+            try writer.print("    Content-Type: {s}\n", .{ct});
+        }
+        if (self.headers.accept) |accept| {
+            try writer.print("    Accept: {s}\n", .{accept});
+        }
+
+        // Print custom headers
+        var it = self.headers.custom.iterator();
+        while (it.next()) |header| {
+            try writer.print("    {s}: {s}\n", .{ header.key_ptr.*, header.value_ptr.* });
+        }
+
+        // Print body if not empty
+        if (self.body.len > 0) {
+            try writer.print("  Body: {s}\n", .{self.body});
+        }
+    }
+
+    pub fn toString(self: Endpoint, allocator: std.mem.Allocator) ![]const u8 {
+        var list = std.ArrayList(u8).init(allocator);
+        errdefer list.deinit();
+        try self.print(list.writer());
+        return list.toOwnedSlice();
+    }
 };
 
 pub const Request = struct {
@@ -42,9 +127,45 @@ pub const Request = struct {
     }
     pub fn methodFromStr(method: []const u8) !http.Method {
         // TODO(Alex): support more methods
-        if (std.mem.eql(u8, method, "GET") or std.mem.eql("get")) return http.Method.GET;
-        if (std.mem.eql(u8, method, "POST") or std.mem.eql("post")) return http.Method.GET;
+        if (std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "get")) return http.Method.GET;
+        if (std.mem.eql(u8, method, "POST") or std.mem.eql(u8, method, "post")) return http.Method.GET;
         return error.InvalidMethod;
+    }
+
+    pub fn print(self: Request, writer: anytype) !void {
+        try writer.print("Request:\n", .{});
+        try writer.print("  Method: {s}\n", .{methodToString(self.method)});
+        try writer.print("  URL: {s}\n", .{self.url});
+
+        // Print headers
+        try writer.print("  Headers:\n", .{});
+        if (self.headers.authorization) |auth| {
+            try writer.print("    Authorization: {s}\n", .{auth});
+        }
+        if (self.headers.content_type) |ct| {
+            try writer.print("    Content-Type: {s}\n", .{ct});
+        }
+        if (self.headers.accept) |accept| {
+            try writer.print("    Accept: {s}\n", .{accept});
+        }
+
+        // Print custom headers
+        var it = self.headers.custom.iterator();
+        while (it.next()) |header| {
+            try writer.print("    {s}: {s}\n", .{ header.key_ptr.*, header.value_ptr.* });
+        }
+
+        // Print body if exists
+        if (self.body) |body| {
+            try writer.print("  Body: {s}\n", .{body});
+        }
+    }
+
+    pub fn toString(self: Request, allocator: std.mem.Allocator) ![]const u8 {
+        var list = std.ArrayList(u8).init(allocator);
+        errdefer list.deinit();
+        try self.print(list.writer());
+        return list.toOwnedSlice();
     }
 };
 

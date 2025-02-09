@@ -1,0 +1,17 @@
+[
+  {
+    "method": "GET",
+    "url": "http://google.com",
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  },
+  {
+    "body": "",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://httpbin.org/post"
+  }
+]

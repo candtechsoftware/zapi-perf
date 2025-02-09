@@ -110,14 +110,14 @@ pub const ThreadPool = struct {
         defer task.connection_pool.release(client) catch {};
         const req: api.Request = .{
             .method = task.endpoint.method,
-            .url = task.endpoint.full_path,
+            .url = task.endpoint.url,
             .headers = task.endpoint.headers,
             .body = task.endpoint.body,
         };
 
         var res = client.send(req) catch |err| {
             try task.store.add(.{
-                .url = task.endpoint.full_path,
+                .url = task.endpoint.url,
                 .status = 0,
                 .response_time = std.time.milliTimestamp() - start_time,
                 .timestamp = std.time.milliTimestamp(),
@@ -133,7 +133,7 @@ pub const ThreadPool = struct {
         const end_time = std.time.milliTimestamp();
         try task.store.add(
             .{
-                .url = task.endpoint.full_path,
+                .url = task.endpoint.url,
                 .status = res.status,
                 .response_time = end_time - start_time,
                 .timestamp = end_time,
