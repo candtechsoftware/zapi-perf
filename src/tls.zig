@@ -22,7 +22,7 @@ pub const TlsStream = struct {
         data: []const u8,
     };
 
-    const TLS_VERSION = 0x0303; // TLS 1.2
+    const TLS_VERSION = 0x0303; // TLS 1.2 TODO(Alex): Support other versions
     const RECORD_TYPE_HANDSHAKE = 0x16;
     const RECORD_TYPE_APPLICATION_DATA = 0x17;
     const HANDSHAKE_TYPE_CLIENT_HELLO = 0x01;
@@ -86,10 +86,11 @@ pub const TlsStream = struct {
 
         try client_hello.appendSlice(&[_]u8{
             HANDSHAKE_TYPE_CLIENT_HELLO,
-            0x00, 0x00, 0x00, // Length placeholder
+            0x00,
+            0x00,
+            0x00,
         });
 
-        // Client version
         try client_hello.appendSlice(&[_]u8{
             @intCast((TLS_VERSION >> 8) & 0xFF),
             @intCast(TLS_VERSION & 0xFF),
@@ -104,12 +105,9 @@ pub const TlsStream = struct {
             0x00, 0x9C, // TLS_RSA_WITH_AES_128_GCM_SHA256
         });
 
-        // Compression methods (none)
         try client_hello.appendSlice(&[_]u8{ 0x01, 0x00 });
 
-        // Extensions (minimal SNI)
         if (hostname.len > 0) {
-            // SNI extension
             const sni_len = hostname.len + 5;
             const ext_len = sni_len + 4;
             try client_hello.appendSlice(&[_]u8{
@@ -136,7 +134,6 @@ pub const TlsStream = struct {
             return error.UnexpectedMessage;
         }
 
-        // Process ServerHello
         if (server_hello.data[0] != HANDSHAKE_TYPE_SERVER_HELLO) {
             std.debug.print("Unexpected handshake type: {d}\n", .{server_hello.data[0]});
             return error.UnexpectedMessage;

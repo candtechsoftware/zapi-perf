@@ -80,7 +80,7 @@ pub const BenchmarkRunner = struct {
                 try buffered_writer.flush();
                 break;
             }
-            std.time.sleep(10 * std.time.ns_per_ms); // Sleep for 10ms for more responsive updates
+            std.time.sleep(10 * std.time.ns_per_ms); // TODO(Alex) Sleep for 10ms for more responsive updates not sure I like this solution
         }
     }
 

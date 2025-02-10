@@ -3,6 +3,7 @@ const http = std.http;
 const Thread = std.Thread;
 const env = @import("env.zig");
 const tls = @import("tls.zig");
+const http2 = @import("http2.zig");
 
 pub const Endpoint = struct {
     method: http.Method,
@@ -125,6 +126,12 @@ pub const Request = struct {
     url: []const u8,
     body: ?[]const u8,
     headers: Headers = .{},
+    http_version: HttpVersion = .HTTP_1_1,
+
+    pub const HttpVersion = enum(u8) {
+        HTTP_1_1 = 1,
+        HTTP_2_0 = 2,
+    };
 
     pub const Headers = struct {
         authorization: ?[]const u8 = null,
@@ -212,11 +219,42 @@ pub const Response = struct {
 };
 
 pub const Client = struct {
+    const H2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    const H2_FRAME_TYPE = struct {
+        const DATA: u8 = 0x0;
+        const HEADERS: u8 = 0x1;
+        const PRIORITY: u8 = 0x2;
+        const RST_STREAM: u8 = 0x3;
+        const SETTINGS: u8 = 0x4;
+        const PUSH_PROMISE: u8 = 0x5;
+        const PING: u8 = 0x6;
+        const GOAWAY: u8 = 0x7;
+        const WINDOW_UPDATE: u8 = 0x8;
+        const CONTINUATION: u8 = 0x9;
+    };
+
+    const H2_SETTINGS = struct {
+        const HEADER_TABLE_SIZE: u16 = 0x1;
+        const ENABLE_PUSH: u16 = 0x2;
+        const MAX_CONCURRENT_STREAMS: u16 = 0x3;
+        const INITIAL_WINDOW_SIZE: u16 = 0x4;
+        const MAX_FRAME_SIZE: u16 = 0x5;
+        const MAX_HEADER_LIST_SIZE: u16 = 0x6;
+    };
+
+    const H2_FLAGS = struct {
+        const END_STREAM: u8 = 0x1;
+        const END_HEADERS: u8 = 0x4;
+        const PADDED: u8 = 0x8;
+        const PRIORITY: u8 = 0x20;
+    };
+
     allocator: std.mem.Allocator,
     connection: ?std.net.Stream = null,
     stream: union(enum) {
         plain: std.net.Stream,
         secure: *tls.TlsStream,
+        http2: *Http2Connection,
     } = .{ .plain = undefined },
     index: usize,
 
@@ -231,6 +269,7 @@ pub const Client = struct {
         switch (self.stream) {
             .plain => |conn| conn.close(),
             .secure => |conn| conn.deinit(),
+            .http2 => |conn| conn.deinit(),
         }
     }
 
@@ -242,7 +281,6 @@ pub const Client = struct {
         var request_builder = std.ArrayList(u8).init(self.allocator);
         defer request_builder.deinit();
 
-        // Build path with query parameters
         const full_path = if (uri.query) |q| blk: {
             var path_with_query = std.ArrayList(u8).init(self.allocator);
             try path_with_query.writer().print("{s}?{s}", .{ path, q.percent_encoded });
@@ -251,7 +289,7 @@ pub const Client = struct {
         defer if (uri.query != null) self.allocator.free(full_path);
 
         const method_str = Request.methodToString(req.method);
-        try request_builder.writer().print("{s} {s} HTTP/1.1\r\n", .{
+        try request_builder.writer().print("{s} {s} HTTP/1.1\r\n", .{ // TODO(Alex): support other versions of HTTP atl
             method_str,
             full_path,
         });
@@ -288,7 +326,86 @@ pub const Client = struct {
         return try request_builder.toOwnedSlice();
     }
 
+    fn sendH2(self: *Client, req: Request) !Response {
+        try self.stream.http2.connection.writer.writeAll(H2_PREFACE);
+
+        const stream = try self.stream.http2.connection.startStream();
+
+        var headers = std.ArrayList(http2.Header).init(self.allocator);
+        defer headers.deinit();
+
+        try headers.append(.{ .name = ":method", .value = Request.methodToString(req.method) });
+        try headers.append(.{ .name = ":path", .value = req.url });
+        try headers.append(.{ .name = ":scheme", .value = "https" });
+
+        const uri = try std.Uri.parse(req.url);
+        const host = if (uri.host) |h| h.percent_encoded else return error.InvalidUrl;
+        try headers.append(.{ .name = ":authority", .value = host });
+
+        if (req.headers.authorization) |auth| {
+            try headers.append(.{ .name = "authorization", .value = auth });
+        }
+        if (req.headers.content_type) |ct| {
+            try headers.append(.{ .name = "content-type", .value = ct });
+        }
+        if (req.headers.accept) |accept| {
+            try headers.append(.{ .name = "accept", .value = accept });
+        }
+
+        var header_it = req.headers.custom.iterator();
+        while (header_it.next()) |h| {
+            try headers.append(.{
+                .name = h.key_ptr.*,
+                .value = h.value_ptr.*,
+            });
+        }
+
+        const flags: u8 = if (req.body == null) http2.FrameFlags.EndStream | http2.FrameFlags.EndHeaders else http2.FrameFlags.EndHeaders;
+        try self.stream.http2.connection.sendHeaders(stream, headers.items, flags);
+
+        if (req.body) |body| {
+            try self.stream.http2.connection.sendData(stream, body, http2.FrameFlags.EndStream);
+        }
+
+        const response_headers = try self.stream.http2.connection.readHeaders(stream);
+        const response_data = try self.stream.http2.connection.readData(stream);
+
+        var res_headers = std.StringHashMap([]const u8).init(self.allocator);
+        var status: u32 = 200; // Seems ok to have the default status?
+
+        for (response_headers.items) |header| {
+            if (std.mem.eql(u8, header.name, ":status")) {
+                status = try std.fmt.parseInt(u32, header.value, 10);
+            } else if (!std.mem.startsWith(u8, header.name, ":")) {
+                try res_headers.put(
+                    try self.allocator.dupe(u8, header.name),
+                    try self.allocator.dupe(u8, header.value),
+                );
+            }
+        }
+
+        return .{
+            .status = status,
+            .body = try self.allocator.dupe(u8, response_data.items),
+            .headers = res_headers,
+            .allocator = self.allocator,
+            .sent_bytes = if (req.body) |b| b.len else 0,
+            .received_bytes = response_data.items.len,
+        };
+    }
+
     pub fn send(self: *Client, req: Request) !Response {
+        switch (req.http_version) {
+            .HTTP_1_1 => return self.sendH1(req),
+            .HTTP_2_0 => return self.sendH2(req),
+        }
+
+        // TODO: Add ALPN negotiation for HTTP/2
+        // For now, default to HTTP/1.1
+        return self.sendH1(req);
+    }
+
+    fn sendH1(self: *Client, req: Request) !Response {
         const uri = try std.Uri.parse(req.url);
         // Don't free host here since it's a slice of req.url which is owned by the Endpoint
         const host = if (uri.host) |h| h.percent_encoded else return error.InvalidUrl;
@@ -314,6 +431,7 @@ pub const Client = struct {
         switch (self.stream) {
             .plain => |*conn| try conn.writer().writeAll(http_request),
             .secure => |conn| try conn.writer().writeAll(http_request),
+            .http2 => |conn| try conn.connection.writer.writeAll(http_request),
         }
 
         var total_received: usize = 0;
@@ -327,6 +445,7 @@ pub const Client = struct {
         const status_line = switch (self.stream) {
             .plain => |*conn| try conn.reader().readUntilDelimiter(&status_buffer, '\n'),
             .secure => |conn| try conn.reader().readUntilDelimiter(&status_buffer, '\n'),
+            .http2 => |conn| try conn.connection.reader.readUntilDelimiter(&status_buffer, '\n'),
         };
         total_received += status_line.len;
         var parts = std.mem.splitAny(u8, status_line, " ");
@@ -348,6 +467,13 @@ pub const Client = struct {
                     return err;
                 },
                 .secure => |conn| conn.reader().readUntilDelimiter(&header_buffer, '\n') catch |err| {
+                    if (err == error.StreamTooLong) {
+                        std.log.warn("Header too long, truncating", .{});
+                        continue;
+                    }
+                    return err;
+                },
+                .http2 => |conn| conn.connection.reader.readUntilDelimiter(&header_buffer, '\n') catch |err| {
                     if (err == error.StreamTooLong) {
                         std.log.warn("Header too long, truncating", .{});
                         continue;
@@ -390,6 +516,7 @@ pub const Client = struct {
                 const read = switch (self.stream) {
                     .plain => |*conn| try conn.reader().read(buffer[0..to_read]),
                     .secure => |conn| try conn.reader().read(buffer[0..to_read]),
+                    .http2 => |conn| try conn.connection.reader.read(buffer[0..to_read]),
                 };
                 if (read == 0) break;
                 try body.appendSlice(buffer[0..read]);
@@ -404,6 +531,10 @@ pub const Client = struct {
                         return err;
                     },
                     .secure => |conn| conn.reader().read(&buffer) catch |err| {
+                        if (err == error.ConnectionResetByPeer) break;
+                        return err;
+                    },
+                    .http2 => |conn| conn.connection.reader.read(&buffer) catch |err| {
                         if (err == error.ConnectionResetByPeer) break;
                         return err;
                     },
@@ -422,6 +553,23 @@ pub const Client = struct {
             .sent_bytes = sent_len,
             .received_bytes = total_received,
         };
+    }
+};
+
+const Http2Connection = struct {
+    connection: *http2.Connection,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, reader: std.fs.File.Reader, writer: std.fs.File.Writer) !*Http2Connection {
+        const self = try allocator.create(Http2Connection);
+        self.connection = try http2.Connection.init(allocator, reader, writer);
+        self.allocator = allocator;
+        return self;
+    }
+
+    pub fn deinit(self: *Http2Connection) void {
+        self.connection.deinit();
+        self.allocator.destroy(self);
     }
 };
 
