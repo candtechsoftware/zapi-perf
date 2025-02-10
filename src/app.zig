@@ -42,7 +42,6 @@ pub const App = struct {
             self.endpoints,
             self.config.num_requests_per_endpoint,
         );
-
         try self.runner.store.printDetailedStats();
     }
 };

@@ -20,6 +20,7 @@ pub const BenchmarkRunner = struct {
     connection_pool: *api.ConnectionPool,
     store: *store.ResultStore,
     allocator: std.mem.Allocator,
+    completed_tasks: std.atomic.Value(usize),
 
     pub fn init(allocator: std.mem.Allocator, thread_count: usize, connection_count: usize) !*BenchmarkRunner {
         var runner = try allocator.create(BenchmarkRunner);
@@ -28,6 +29,7 @@ pub const BenchmarkRunner = struct {
         runner.connection_pool.* = try api.ConnectionPool.init(allocator, connection_count);
         runner.store = try allocator.create(store.ResultStore);
         runner.store.* = store.ResultStore.init(allocator);
+        runner.completed_tasks = std.atomic.Value(usize).init(0);
         runner.allocator = allocator;
         return runner;
     }
@@ -47,10 +49,7 @@ pub const BenchmarkRunner = struct {
         var buffered_writer = std.io.bufferedWriter(stdout_file.writer());
         const stdout = buffered_writer.writer();
 
-        // Print initial progress
-        try stdout.print("\rProgress: 0.00%", .{});
-        try buffered_writer.flush();
-
+        // Submit all tasks first
         for (endpoints) |endpoint| {
             for (0..req_per_endpoint) |_| {
                 try self.thread_pool.submit(.{
@@ -61,24 +60,35 @@ pub const BenchmarkRunner = struct {
             }
         }
 
+        var last_completed: usize = 0;
         while (true) {
-            const completed = self.thread_pool.getCompletedTask();
-            const progress = @as(f64, @floatFromInt(completed)) / @as(f64, @floatFromInt(total_tasks));
-            const filled = @as(usize, @intFromFloat(progress * @as(f64, bar_width)));
+            const completed = self.thread_pool.getCompletedTasks();
+            if (completed != last_completed) {
+                last_completed = completed;
+                const progress = (completed * 100) / total_tasks;
+                const filled = (completed * bar_width) / total_tasks;
 
-            // Update progress bar
-            try stdout.print("\r[", .{});
-            try stdout.writeByteNTimes('=', filled);
-            try stdout.writeByteNTimes(' ', bar_width - filled);
-            try stdout.print("] {d:3.2}%", .{progress * 100.0});
-            try buffered_writer.flush();
+                try stdout.print("\r[", .{});
+                try stdout.writeByteNTimes('=', filled);
+                try stdout.writeByteNTimes(' ', bar_width - filled);
+                try stdout.print("] {d}%", .{progress});
+                try buffered_writer.flush();
+            }
 
-            if (completed == total_tasks) {
+            if (completed >= total_tasks) {
                 try stdout.print("\n", .{});
                 try buffered_writer.flush();
                 break;
             }
-            std.time.sleep(100 * std.time.ns_per_ms);
+            std.time.sleep(10 * std.time.ns_per_ms); // Sleep for 10ms for more responsive updates
         }
+    }
+
+    pub fn getCompletedTasks(self: *BenchmarkRunner) usize {
+        return self.completed_tasks.load(.monotonic);
+    }
+
+    pub fn incrementCompletedTasks(self: *BenchmarkRunner) void {
+        _ = self.completed_tasks.fetchAdd(1, .monotonic);
     }
 };

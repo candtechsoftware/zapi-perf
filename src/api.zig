@@ -2,6 +2,7 @@ const std = @import("std");
 const http = std.http;
 const Thread = std.Thread;
 const env = @import("env.zig");
+const tls = @import("tls.zig");
 
 pub const Endpoint = struct {
     method: http.Method,
@@ -27,11 +28,26 @@ pub const Endpoint = struct {
         const value = parsed.value;
         if (value != .object) return error.InvalidJson;
 
+        // Extract and validate method and url
         const method = value.object.get("method") orelse return error.MissingMethod;
-        const url = value.object.get("url") orelse return error.MissingUrl;
-        if (method != .string or url != .string) return error.InvalidFormat;
+        const url_value = value.object.get("url") orelse return error.MissingUrl;
+
+        if (method != .string or url_value != .string) return error.InvalidFormat;
+
+        // Create owned copies of strings
+        const url_copy = try allocator.dupe(u8, url_value.string);
+        errdefer allocator.free(url_copy);
 
         var headers = Request.Headers.init(allocator);
+        errdefer {
+            // Clean up headers if we fail after this point
+            if (headers.authorization) |auth| allocator.free(auth);
+            if (headers.content_type) |ct| allocator.free(ct);
+            if (headers.accept) |accept| allocator.free(accept);
+            headers.custom.deinit();
+        }
+
+        // Parse headers if present
         if (value.object.get("headers")) |h| {
             if (h == .object) {
                 var it = h.object.iterator();
@@ -64,7 +80,7 @@ pub const Endpoint = struct {
 
         return .{
             .method = try Request.methodFromStr(method.string),
-            .url = try allocator.dupe(u8, url.string),
+            .url = url_copy,
             .body = body_str,
             .headers = headers,
         };
@@ -200,6 +216,7 @@ pub const Client = struct {
     connection: ?std.net.Stream = null,
     stream: union(enum) {
         plain: std.net.Stream,
+        secure: *tls.TlsStream,
     } = .{ .plain = undefined },
     index: usize,
 
@@ -211,15 +228,17 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
-        if (self.connection) |con| {
-            con.close();
+        switch (self.stream) {
+            .plain => |conn| conn.close(),
+            .secure => |conn| conn.deinit(),
         }
     }
 
     fn buildHttpRequest(self: *Client, req: Request) ![]const u8 {
         const uri = try std.Uri.parse(req.url);
-        const host = try std.Uri.Component.toRawMaybeAlloc(uri.host.?, self.allocator);
+        const host = if (uri.host) |h| h.percent_encoded else return error.InvalidUrl;
         const path = if (uri.path.percent_encoded.len == 0) "/" else uri.path.percent_encoded;
+
         var request_builder = std.ArrayList(u8).init(self.allocator);
         defer request_builder.deinit();
 
@@ -271,7 +290,9 @@ pub const Client = struct {
 
     pub fn send(self: *Client, req: Request) !Response {
         const uri = try std.Uri.parse(req.url);
-        const host = try std.Uri.Component.toRawMaybeAlloc(uri.host.?, self.allocator);
+        // Don't free host here since it's a slice of req.url which is owned by the Endpoint
+        const host = if (uri.host) |h| h.percent_encoded else return error.InvalidUrl;
+
         const is_https = std.mem.startsWith(u8, req.url, "https");
         const port: u16 = uri.port orelse if (is_https) 443 else 80;
 
@@ -279,15 +300,21 @@ pub const Client = struct {
         errdefer socket.close();
 
         if (is_https) {
-            @panic("TLS not supported yet");
+            var tls_stream = try tls.TlsStream.init(self.allocator, socket);
+            errdefer tls_stream.deinit();
+            try tls_stream.connect(host);
+            self.stream = .{ .secure = tls_stream };
         } else {
             self.stream = .{ .plain = socket };
         }
 
-        var conn = self.stream.plain;
         const http_request = try self.buildHttpRequest(req);
         const sent_len = http_request.len;
-        try conn.writer().writeAll(http_request);
+
+        switch (self.stream) {
+            .plain => |*conn| try conn.writer().writeAll(http_request),
+            .secure => |conn| try conn.writer().writeAll(http_request),
+        }
 
         var total_received: usize = 0;
         var buffer: [4096]u8 = undefined;
@@ -297,7 +324,10 @@ pub const Client = struct {
 
         // Reading the status of the request
         var status_buffer: [128]u8 = undefined;
-        const status_line = try conn.reader().readUntilDelimiter(&status_buffer, '\n');
+        const status_line = switch (self.stream) {
+            .plain => |*conn| try conn.reader().readUntilDelimiter(&status_buffer, '\n'),
+            .secure => |conn| try conn.reader().readUntilDelimiter(&status_buffer, '\n'),
+        };
         total_received += status_line.len;
         var parts = std.mem.splitAny(u8, status_line, " ");
         _ = parts.next(); // HTTP version
@@ -309,12 +339,21 @@ pub const Client = struct {
         var header_buffer: [8192]u8 = undefined;
 
         while (true) {
-            const line = conn.reader().readUntilDelimiter(&header_buffer, '\n') catch |err| {
-                if (err == error.StreamTooLong) {
-                    std.log.warn("Header too long, truncating", .{});
-                    continue;
-                }
-                return err;
+            const line = switch (self.stream) {
+                .plain => |*conn| conn.reader().readUntilDelimiter(&header_buffer, '\n') catch |err| {
+                    if (err == error.StreamTooLong) {
+                        std.log.warn("Header too long, truncating", .{});
+                        continue;
+                    }
+                    return err;
+                },
+                .secure => |conn| conn.reader().readUntilDelimiter(&header_buffer, '\n') catch |err| {
+                    if (err == error.StreamTooLong) {
+                        std.log.warn("Header too long, truncating", .{});
+                        continue;
+                    }
+                    return err;
+                },
             };
             total_received += line.len;
             if (line.len <= 2) break; // empty line
@@ -348,7 +387,10 @@ pub const Client = struct {
             var remain = len;
             while (remain > 0) {
                 const to_read = @min(remain, buffer.len);
-                const read = try conn.read(buffer[0..to_read]);
+                const read = switch (self.stream) {
+                    .plain => |*conn| try conn.reader().read(buffer[0..to_read]),
+                    .secure => |conn| try conn.reader().read(buffer[0..to_read]),
+                };
                 if (read == 0) break;
                 try body.appendSlice(buffer[0..read]);
                 remain -= read;
@@ -356,9 +398,15 @@ pub const Client = struct {
             }
         } else {
             while (true) {
-                const read = conn.read(&buffer) catch |err| {
-                    if (err == error.ConnectionResetByPeer) break;
-                    return err;
+                const read = switch (self.stream) {
+                    .plain => |*conn| conn.reader().read(&buffer) catch |err| {
+                        if (err == error.ConnectionResetByPeer) break;
+                        return err;
+                    },
+                    .secure => |conn| conn.reader().read(&buffer) catch |err| {
+                        if (err == error.ConnectionResetByPeer) break;
+                        return err;
+                    },
                 };
                 if (read == 0) break;
                 try body.appendSlice(buffer[0..read]);

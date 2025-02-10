@@ -164,4 +164,8 @@ pub const ThreadPool = struct {
     pub fn getCompletedTask(self: *ThreadPool) usize {
         return self.completed_tasks.load(.monotonic);
     }
+
+    pub fn getCompletedTasks(self: *ThreadPool) usize {
+        return self.completed_tasks.load(.monotonic);
+    }
 };
