@@ -482,7 +482,7 @@ pub const Client = struct {
                 },
             };
             total_received += line.len;
-            if (line.len <= 2) break; // empty line
+            if (line.len <= 2) break; // skipping empty line
 
             var header_parts = std.mem.splitAny(u8, line, ":");
             if (header_parts.next()) |name| {
