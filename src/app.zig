@@ -11,6 +11,7 @@ pub const App = struct {
     config: Config,
 
     pub const Config = struct {
+        file_path: ?[]const u8 = null,
         num_threads: usize = 1,
         connection_count: usize = 1,
         num_requests_per_endpoint: usize = 10,
@@ -21,15 +22,35 @@ pub const App = struct {
         try env.load();
         defer env.deinit();
 
-        const parser = json.Parser.init(allocator, env);
+        var parser = json.Parser.init(allocator, env);
 
-        var cli = Cli.init(allocator, parser);
+        var cli = Cli.init(allocator);
 
         const parsed_args = try cli.parseArgs();
-        const config = parsed_args.config;
-        const endpoints = parsed_args.endpoints;
+        var config: Config = undefined;
+
+        for (parsed_args) |command| {
+            switch (command) {
+                .File => |file_path| {
+                    config.file_path = file_path;
+                },
+                .num_threads => |num_threads| {
+                    config.num_threads = num_threads;
+                },
+                .num_connections => |num_connections| {
+                    config.connection_count = num_connections;
+                },
+                .num_requests_per_endpoint => |num_requests_per_endpoint| {
+                    config.num_requests_per_endpoint = num_requests_per_endpoint;
+                },
+            }
+        }
+
+        const file_path = config.file_path orelse return error.MissingArgumentFilePath;
+        const endpoints = try parser.parse(file_path);
 
         const runner = try Runner.init(allocator, config.num_threads, config.connection_count);
+
         return .{
             .runner = runner,
             .endpoints = endpoints,

@@ -527,7 +527,6 @@ pub const HuffmanDecoder = struct {
 
             if (entry.bits <= self.bits_left) {
                 try self.buffer.append(entry.value);
-                // Fix the shift operation by using a fixed-width integer type
                 const mask_shift = @as(u5, @truncate(self.bits_left - entry.bits));
                 const mask = (@as(u32, 1) << mask_shift) - 1;
                 self.state = self.state & mask;

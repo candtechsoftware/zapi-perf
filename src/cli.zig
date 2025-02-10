@@ -4,19 +4,24 @@ const Endpoint = @import("api.zig").Endpoint;
 const Config = @import("app.zig").App.Config;
 const Env = @import("env.zig").Env;
 
+const Command = union(enum) {
+    File: []const u8,
+    num_threads: usize,
+    num_connections: usize,
+    num_requests_per_endpoint: usize,
+};
+
 pub const Cli = struct {
     allocator: std.mem.Allocator,
-    parser: Parser,
 
     const Result = struct {
         endpoints: []Endpoint,
         config: Config,
     };
 
-    pub fn init(allocator: std.mem.Allocator, parser: Parser) Cli {
+    pub fn init(allocator: std.mem.Allocator) Cli {
         return .{
             .allocator = allocator,
-            .parser = parser,
         };
     }
 
@@ -34,38 +39,34 @@ pub const Cli = struct {
         return std.fmt.parseInt(usize, value, 10);
     }
 
-    pub fn parseArgs(self: *Cli) !Result {
+    pub fn parseArgs(self: *Cli) ![]Command {
         var args = try std.process.argsWithAllocator(self.allocator);
         defer args.deinit();
         _ = args.skip(); // Skipping the name of the program
 
-        var ret: struct { endpoints: ?[]Endpoint, config: Config } = .{
-            .endpoints = null,
-            .config = .{},
-        };
+        var commands = std.ArrayList(Command).init(self.allocator);
 
         while (args.next()) |arg| {
             if (std.mem.startsWith(u8, arg, "--file=") or std.mem.startsWith(u8, arg, "-f=")) {
                 var parts = std.mem.splitAny(u8, arg, "=");
                 _ = parts.first(); // Skipping the flag name
                 const file_path = parts.next() orelse return error.InvalidArgument;
-                const endpoints = try self.parser.parse(file_path);
-                ret.endpoints = endpoints;
+                try commands.append(.{ .File = file_path });
             } else if (std.mem.startsWith(u8, arg, "--thread-count=")) {
                 var parts = std.mem.splitAny(u8, arg, "=");
                 _ = parts.first();
                 const value = parts.next() orelse return error.InvalidArgument;
-                ret.config.num_threads = try parseConfigValue(value);
+                try commands.append(.{ .num_threads = (try parseConfigValue(value)) });
             } else if (std.mem.startsWith(u8, arg, "--connection-count=")) {
                 var parts = std.mem.splitAny(u8, arg, "=");
                 _ = parts.first();
                 const value = parts.next() orelse return error.InvalidArgument;
-                ret.config.connection_count = try parseConfigValue(value);
+                try commands.append(.{ .num_connections = (try parseConfigValue(value)) });
             } else if (std.mem.startsWith(u8, arg, "--request-count=")) {
                 var parts = std.mem.splitAny(u8, arg, "=");
                 _ = parts.first();
                 const value = parts.next() orelse return error.InvalidArgument;
-                ret.config.num_requests_per_endpoint = try parseConfigValue(value);
+                try commands.append(.{ .num_requests_per_endpoint = (try parseConfigValue(value)) });
             } else if (std.mem.startsWith(u8, arg, "--help") or std.mem.startsWith(u8, arg, "-h")) {
                 printUsage();
                 return error.Help;
@@ -75,14 +76,22 @@ pub const Cli = struct {
                 return error.InvalidArgument;
             }
         }
-        if (ret.endpoints == null) {
-            std.log.err("No endpoints provided\n", .{});
+
+        // Validate that the --file argument was provided
+        var has_file = false;
+        for (commands.items) |it| {
+            if (it != .File) {
+                has_file = true;
+                break;
+            }
+        }
+
+        if (!has_file) {
+            std.log.err("Missing required argument: --file\n", .{});
             printUsage();
             return error.InvalidArgument;
         }
-        return .{
-            .endpoints = ret.endpoints.?,
-            .config = ret.config,
-        };
+
+        return commands.toOwnedSlice();
     }
 };
